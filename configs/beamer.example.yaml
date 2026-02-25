@@ -1,0 +1,48 @@
+server:
+  host: "0.0.0.0"
+  port: 8443
+  read_timeout: 30s
+  write_timeout: 0s
+  idle_timeout: 120s
+
+tls:
+  cert_file: "./data/cert.pem"
+  key_file: "./data/key.pem"
+  hosts:
+    - "localhost"
+    # Add your DDNS hostname:
+    # - "myserver.example.com"
+
+database:
+  path: "./data/beamer.db"
+  journal_mode: "WAL"
+  busy_timeout: 5000
+  cache_size: -2000
+  synchronous: "NORMAL"
+
+auth:
+  jwt_secret: ""  # Auto-generated on first run
+  access_token_ttl: 15m
+  refresh_token_ttl: 168h
+  bcrypt_cost: 12
+  max_login_attempts: 5
+  lockout_duration: 15m
+
+media:
+  directories:
+    # - "/Users/you/Movies"
+    # - "/Users/you/Music"
+    # - "/Users/you/Pictures"
+  scan_on_startup: true
+  watch_enabled: true
+  thumbnail_cache: "./data/thumbnails"
+
+security:
+  cors_origins: []
+  ip_allowlist: []
+  rate_limit_rps: 10
+  rate_limit_burst: 20
+
+logging:
+  level: "info"
+  format: "text"

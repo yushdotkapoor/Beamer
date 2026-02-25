@@ -1,0 +1,7 @@
+bin/
+data/
+*.db
+coverage.out
+coverage.html
+.DS_Store
+beamer.yaml

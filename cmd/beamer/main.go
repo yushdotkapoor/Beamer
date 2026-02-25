@@ -86,9 +86,24 @@ func main() {
 	jwtMgr := auth.NewJWTManager(jwtSecret, cfg.Auth.AccessTokenTTL, cfg.Auth.RefreshTokenTTL)
 	authHandler := auth.NewHandler(db, jwtMgr, cfg.Auth)
 
+	// Merge upload directory into scanned directories
+	allMediaDirs := cfg.Media.Directories
+	if cfg.Media.UploadDirectory != "" {
+		found := false
+		for _, d := range allMediaDirs {
+			if d == cfg.Media.UploadDirectory {
+				found = true
+				break
+			}
+		}
+		if !found {
+			allMediaDirs = append(allMediaDirs, cfg.Media.UploadDirectory)
+		}
+	}
+
 	mediaStore := media.NewStore(db)
-	mediaScanner := media.NewScanner(mediaStore, cfg.Media.Directories)
-	mediaHandler := media.NewHandler(mediaStore, mediaScanner)
+	mediaScanner := media.NewScanner(mediaStore, allMediaDirs)
+	mediaHandler := media.NewHandler(mediaStore, mediaScanner, cfg.Media.UploadDirectory)
 
 	handler := router.New(router.Deps{
 		AuthHandler:  authHandler,
@@ -110,14 +125,14 @@ func main() {
 	}
 
 	// Media scanning
-	if cfg.Media.ScanOnStartup && len(cfg.Media.Directories) > 0 {
+	if cfg.Media.ScanOnStartup && len(allMediaDirs) > 0 {
 		go mediaScanner.FullScan()
 	}
 
 	var mediaWatcher *media.Watcher
-	if cfg.Media.WatchEnabled && len(cfg.Media.Directories) > 0 {
+	if cfg.Media.WatchEnabled && len(allMediaDirs) > 0 {
 		var err error
-		mediaWatcher, err = media.NewWatcher(mediaScanner, cfg.Media.Directories)
+		mediaWatcher, err = media.NewWatcher(mediaScanner, allMediaDirs)
 		if err != nil {
 			slog.Error("failed to create file watcher", "error", err)
 		} else {

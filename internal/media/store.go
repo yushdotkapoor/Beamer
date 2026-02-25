@@ -323,6 +323,63 @@ func (s *Store) ListDirectories() ([]string, error) {
 	return dirs, nil
 }
 
+func (s *Store) DeleteByID(id int64) (string, error) {
+	var filePath string
+	err := s.db.QueryRow("SELECT file_path FROM media WHERE id = ?", id).Scan(&filePath)
+	if err != nil {
+		return "", err
+	}
+	_, err = s.db.Exec("DELETE FROM media WHERE id = ?", id)
+	if err != nil {
+		return "", err
+	}
+	return filePath, nil
+}
+
+func (s *Store) UpdateFileName(id int64, newPath, newName, newParentDir string) error {
+	_, err := s.db.Exec(
+		`UPDATE media SET file_path = ?, file_name = ?, parent_dir = ?, updated_at = datetime('now') WHERE id = ?`,
+		newPath, newName, newParentDir, id,
+	)
+	return err
+}
+
+func (s *Store) GetByFilePath(path string) (*MediaItem, error) {
+	var item MediaItem
+	var durSec sql.NullFloat64
+	var width, height sql.NullInt64
+
+	err := s.db.QueryRow(
+		`SELECT id, file_path, file_name, media_type, mime_type, file_size, duration_sec, width, height, parent_dir, created_at, updated_at
+		 FROM media WHERE file_path = ?`, path,
+	).Scan(&item.ID, &item.FilePath, &item.FileName, &item.MediaType, &item.MimeType,
+		&item.FileSize, &durSec, &width, &height, &item.ParentDir, &item.CreatedAt, &item.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+
+	if durSec.Valid {
+		item.DurationSec = &durSec.Float64
+	}
+	if width.Valid {
+		w := int(width.Int64)
+		item.Width = &w
+	}
+	if height.Valid {
+		h := int(height.Int64)
+		item.Height = &h
+	}
+
+	item.FileSizeH = humanizeBytes(item.FileSize)
+	item.DurationH = humanizeDuration(item.DurationSec)
+	item.StreamURL = fmt.Sprintf("/api/v1/media/%d/stream", item.ID)
+	if item.MediaType == "photo" {
+		item.ThumbnailURL = fmt.Sprintf("/api/v1/media/%d/thumbnail", item.ID)
+	}
+
+	return &item, nil
+}
+
 func (s *Store) Count() (total, videos, audio, photos int) {
 	s.db.QueryRow("SELECT COUNT(*) FROM media").Scan(&total)
 	s.db.QueryRow("SELECT COUNT(*) FROM media WHERE media_type = 'video'").Scan(&videos)

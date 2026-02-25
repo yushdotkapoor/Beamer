@@ -2,18 +2,25 @@ package media
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
+	"time"
 )
 
 type Handler struct {
-	store   *Store
-	scanner *Scanner
+	store     *Store
+	scanner   *Scanner
+	uploadDir string
 }
 
-func NewHandler(store *Store, scanner *Scanner) *Handler {
-	return &Handler{store: store, scanner: scanner}
+func NewHandler(store *Store, scanner *Scanner, uploadDir string) *Handler {
+	return &Handler{store: store, scanner: scanner, uploadDir: uploadDir}
 }
 
 func (h *Handler) ListMedia(w http.ResponseWriter, r *http.Request) {
@@ -197,6 +204,145 @@ func (h *Handler) TriggerRescan(w http.ResponseWriter, r *http.Request) {
 		"data": map[string]string{
 			"message": "Rescan started in background",
 		},
+	})
+}
+
+func (h *Handler) UploadMedia(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, "PARSE_ERROR", "Failed to parse upload")
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "MISSING_FILE", "No file provided in 'file' field")
+		return
+	}
+	defer file.Close()
+
+	filename := header.Filename
+	if !IsMediaFile(filename) {
+		writeError(w, http.StatusBadRequest, "UNSUPPORTED_TYPE", "File type not supported")
+		return
+	}
+
+	destPath := filepath.Join(h.uploadDir, filename)
+
+	// Handle filename conflicts
+	if _, err := os.Stat(destPath); err == nil {
+		ext := filepath.Ext(filename)
+		base := strings.TrimSuffix(filename, ext)
+		destPath = filepath.Join(h.uploadDir, fmt.Sprintf("%s_%d%s", base, time.Now().UnixNano(), ext))
+	}
+
+	dest, err := os.Create(destPath)
+	if err != nil {
+		slog.Error("failed to create upload file", "path", destPath, "error", err)
+		writeError(w, http.StatusInternalServerError, "WRITE_ERROR", "Failed to save file")
+		return
+	}
+	defer dest.Close()
+
+	if _, err := io.Copy(dest, file); err != nil {
+		os.Remove(destPath)
+		writeError(w, http.StatusInternalServerError, "WRITE_ERROR", "Failed to write file")
+		return
+	}
+
+	// Index the file immediately
+	h.scanner.ScanFile(destPath)
+
+	item, err := h.store.GetByFilePath(destPath)
+	if err != nil {
+		writeJSON(w, http.StatusCreated, map[string]interface{}{
+			"data": map[string]string{
+				"message":   "File uploaded successfully",
+				"file_name": filepath.Base(destPath),
+			},
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]interface{}{
+		"data": item,
+	})
+}
+
+func (h *Handler) DeleteMedia(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "Invalid media ID")
+		return
+	}
+
+	filePath, err := h.store.DeleteByID(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Media not found")
+		return
+	}
+
+	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+		slog.Warn("failed to delete file from disk", "path", filePath, "error", err)
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) RenameMedia(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "Invalid media ID")
+		return
+	}
+
+	var req struct {
+		FileName string `json:"file_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.FileName == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "file_name is required")
+		return
+	}
+
+	if !IsMediaFile(req.FileName) {
+		writeError(w, http.StatusBadRequest, "UNSUPPORTED_TYPE", "File extension not supported")
+		return
+	}
+
+	item, err := h.store.GetByID(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Media not found")
+		return
+	}
+
+	oldPath := item.FilePath
+	newPath := filepath.Join(filepath.Dir(oldPath), req.FileName)
+
+	if oldPath != newPath {
+		if _, err := os.Stat(newPath); err == nil {
+			writeError(w, http.StatusConflict, "FILE_EXISTS", "A file with that name already exists")
+			return
+		}
+
+		if err := os.Rename(oldPath, newPath); err != nil {
+			writeError(w, http.StatusInternalServerError, "RENAME_ERROR", "Failed to rename file")
+			return
+		}
+	}
+
+	if err := h.store.UpdateFileName(id, newPath, req.FileName, filepath.Dir(newPath)); err != nil {
+		os.Rename(newPath, oldPath) // revert
+		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", "Failed to update database")
+		return
+	}
+
+	updated, err := h.store.GetByID(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", "Failed to retrieve updated item")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"data": updated,
 	})
 }
 

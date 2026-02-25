@@ -45,6 +45,14 @@ func New(deps Deps) http.Handler {
 	mux.Handle("GET /api/v1/media/{id}/stream", applyAuth(deps.JWTManager, http.HandlerFunc(deps.MediaHandler.StreamMedia)))
 	mux.Handle("GET /api/v1/media/{id}/thumbnail", applyAuth(deps.JWTManager, http.HandlerFunc(deps.MediaHandler.ServeThumbnail)))
 
+	// Media mutations (authenticated, large body limit for upload)
+	mux.Handle("POST /api/v1/media/upload",
+		withBodyLimit(4<<30, applyAuth(deps.JWTManager, http.HandlerFunc(deps.MediaHandler.UploadMedia))))
+	mux.Handle("DELETE /api/v1/media/{id}",
+		applyAuth(deps.JWTManager, http.HandlerFunc(deps.MediaHandler.DeleteMedia)))
+	mux.Handle("PUT /api/v1/media/{id}",
+		applyAuth(deps.JWTManager, http.HandlerFunc(deps.MediaHandler.RenameMedia)))
+
 	// Admin
 	mux.Handle("POST /api/v1/admin/users", applyAdmin(deps.JWTManager, http.HandlerFunc(deps.AuthHandler.CreateUser)))
 	mux.Handle("GET /api/v1/admin/users", applyAdmin(deps.JWTManager, http.HandlerFunc(deps.AuthHandler.ListUsers)))
@@ -54,13 +62,16 @@ func New(deps Deps) http.Handler {
 	// Build middleware chain (outermost first)
 	var handler http.Handler = mux
 	handler = middleware.SecurityHeaders(handler)
-	handler = middleware.MaxBodySize(1 << 20)(handler) // 1MB
 	handler = middleware.CORS(deps.CORSOrigins)(handler)
 	handler = middleware.IPAllowlist(deps.IPAllowlist)(handler)
 	handler = deps.RateLimiter.Middleware(handler)
 	handler = middleware.Logging(handler)
 
 	return handler
+}
+
+func withBodyLimit(limit int64, h http.Handler) http.Handler {
+	return middleware.MaxBodySize(limit)(h)
 }
 
 func applyAuth(jwtMgr *auth.JWTManager, h http.Handler) http.Handler {

@@ -54,10 +54,11 @@ type AuthConfig struct {
 }
 
 type MediaConfig struct {
-	Directories    []string `yaml:"directories"`
-	ScanOnStartup  bool     `yaml:"scan_on_startup"`
-	WatchEnabled   bool     `yaml:"watch_enabled"`
-	ThumbnailCache string   `yaml:"thumbnail_cache"`
+	Directories     []string `yaml:"directories"`
+	UploadDirectory string   `yaml:"upload_directory"`
+	ScanOnStartup   bool     `yaml:"scan_on_startup"`
+	WatchEnabled    bool     `yaml:"watch_enabled"`
+	ThumbnailCache  string   `yaml:"thumbnail_cache"`
 }
 
 type SecurityConfig struct {
@@ -101,9 +102,10 @@ func Default() *Config {
 			LockoutDuration:  15 * time.Minute,
 		},
 		Media: MediaConfig{
-			ScanOnStartup:  true,
-			WatchEnabled:   true,
-			ThumbnailCache: "./data/thumbnails",
+			UploadDirectory: "./data/uploads",
+			ScanOnStartup:   true,
+			WatchEnabled:    true,
+			ThumbnailCache:  "./data/thumbnails",
 		},
 		Security: SecurityConfig{
 			RateLimitRPS:   10,
@@ -160,6 +162,7 @@ func (c *Config) ensureDirectories() error {
 		filepath.Dir(c.Database.Path),
 		filepath.Dir(c.TLS.CertFile),
 		c.Media.ThumbnailCache,
+		c.Media.UploadDirectory,
 	}
 	for _, dir := range dirs {
 		if dir == "" || dir == "." {

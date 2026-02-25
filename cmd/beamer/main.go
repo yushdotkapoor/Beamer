@@ -14,6 +14,7 @@ import (
 	"github.com/yushrajkapoor/beamer/internal/auth"
 	"github.com/yushrajkapoor/beamer/internal/config"
 	"github.com/yushrajkapoor/beamer/internal/database"
+	"github.com/yushrajkapoor/beamer/internal/media"
 	"github.com/yushrajkapoor/beamer/internal/middleware"
 	"github.com/yushrajkapoor/beamer/internal/router"
 	beamertls "github.com/yushrajkapoor/beamer/internal/tls"
@@ -85,13 +86,18 @@ func main() {
 	jwtMgr := auth.NewJWTManager(jwtSecret, cfg.Auth.AccessTokenTTL, cfg.Auth.RefreshTokenTTL)
 	authHandler := auth.NewHandler(db, jwtMgr, cfg.Auth)
 
+	mediaStore := media.NewStore(db)
+	mediaScanner := media.NewScanner(mediaStore, cfg.Media.Directories)
+	mediaHandler := media.NewHandler(mediaStore, mediaScanner)
+
 	handler := router.New(router.Deps{
-		AuthHandler: authHandler,
-		JWTManager:  jwtMgr,
-		RateLimiter: middleware.NewRateLimiter(cfg.Security.RateLimitRPS, cfg.Security.RateLimitBurst),
-		AuthLimiter: middleware.NewRateLimiter(3, 5),
-		CORSOrigins: cfg.Security.CORSOrigins,
-		IPAllowlist: cfg.Security.IPAllowlist,
+		AuthHandler:  authHandler,
+		MediaHandler: mediaHandler,
+		JWTManager:   jwtMgr,
+		RateLimiter:  middleware.NewRateLimiter(cfg.Security.RateLimitRPS, cfg.Security.RateLimitBurst),
+		AuthLimiter:  middleware.NewRateLimiter(3, 5),
+		CORSOrigins:  cfg.Security.CORSOrigins,
+		IPAllowlist:  cfg.Security.IPAllowlist,
 	})
 
 	srv := &http.Server{
@@ -101,6 +107,24 @@ func main() {
 		ReadTimeout:  cfg.Server.ReadTimeout,
 		WriteTimeout: cfg.Server.WriteTimeout,
 		IdleTimeout:  cfg.Server.IdleTimeout,
+	}
+
+	// Media scanning
+	if cfg.Media.ScanOnStartup && len(cfg.Media.Directories) > 0 {
+		go mediaScanner.FullScan()
+	}
+
+	var mediaWatcher *media.Watcher
+	if cfg.Media.WatchEnabled && len(cfg.Media.Directories) > 0 {
+		var err error
+		mediaWatcher, err = media.NewWatcher(mediaScanner, cfg.Media.Directories)
+		if err != nil {
+			slog.Error("failed to create file watcher", "error", err)
+		} else {
+			if err := mediaWatcher.Start(); err != nil {
+				slog.Error("failed to start file watcher", "error", err)
+			}
+		}
 	}
 
 	// Check if admin exists
@@ -126,6 +150,10 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
+	if mediaWatcher != nil {
+		mediaWatcher.Stop()
+	}
 
 	if err := srv.Shutdown(ctx); err != nil {
 		slog.Error("forced shutdown", "error", err)

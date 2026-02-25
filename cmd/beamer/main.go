@@ -11,8 +11,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yushrajkapoor/beamer/internal/auth"
 	"github.com/yushrajkapoor/beamer/internal/config"
 	"github.com/yushrajkapoor/beamer/internal/database"
+	"github.com/yushrajkapoor/beamer/internal/middleware"
 	"github.com/yushrajkapoor/beamer/internal/router"
 	beamertls "github.com/yushrajkapoor/beamer/internal/tls"
 )
@@ -50,6 +52,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Ensure JWT secret exists
+	jwtSecret := cfg.Auth.JWTSecret
+	if jwtSecret == "" {
+		// Check if stored in DB
+		var stored string
+		err := db.QueryRow("SELECT value FROM server_meta WHERE key = 'jwt_secret'").Scan(&stored)
+		if err == nil && stored != "" {
+			jwtSecret = stored
+		} else {
+			jwtSecret, err = auth.GenerateJWTSecret()
+			if err != nil {
+				slog.Error("failed to generate JWT secret", "error", err)
+				os.Exit(1)
+			}
+			db.Exec("INSERT OR REPLACE INTO server_meta (key, value) VALUES ('jwt_secret', ?)", jwtSecret)
+			slog.Info("generated new JWT signing secret")
+		}
+	}
+
 	if err := beamertls.EnsureCert(cfg.TLS.CertFile, cfg.TLS.KeyFile, cfg.TLS.Hosts); err != nil {
 		slog.Error("failed to ensure TLS certificate", "error", err)
 		os.Exit(1)
@@ -61,24 +82,39 @@ func main() {
 		os.Exit(1)
 	}
 
-	mux := router.New()
+	jwtMgr := auth.NewJWTManager(jwtSecret, cfg.Auth.AccessTokenTTL, cfg.Auth.RefreshTokenTTL)
+	authHandler := auth.NewHandler(db, jwtMgr, cfg.Auth)
+
+	handler := router.New(router.Deps{
+		AuthHandler: authHandler,
+		JWTManager:  jwtMgr,
+		RateLimiter: middleware.NewRateLimiter(cfg.Security.RateLimitRPS, cfg.Security.RateLimitBurst),
+		AuthLimiter: middleware.NewRateLimiter(3, 5),
+		CORSOrigins: cfg.Security.CORSOrigins,
+		IPAllowlist: cfg.Security.IPAllowlist,
+	})
 
 	srv := &http.Server{
 		Addr:         cfg.Address(),
-		Handler:      mux,
+		Handler:      handler,
 		TLSConfig:    tlsConfig,
 		ReadTimeout:  cfg.Server.ReadTimeout,
 		WriteTimeout: cfg.Server.WriteTimeout,
 		IdleTimeout:  cfg.Server.IdleTimeout,
 	}
 
-	// Graceful shutdown
+	// Check if admin exists
+	var adminCount int
+	db.QueryRow("SELECT COUNT(*) FROM users WHERE role = 'admin'").Scan(&adminCount)
+	if adminCount == 0 {
+		slog.Info("no admin user found — register at POST /api/v1/auth/register")
+	}
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
 		slog.Info("beamer is running", "address", fmt.Sprintf("https://%s", cfg.Address()))
-		// TLS is configured via TLSConfig, so use ServeTLS with empty cert/key paths
 		if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 			slog.Error("server error", "error", err)
 			os.Exit(1)

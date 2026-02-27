@@ -10,20 +10,22 @@ import (
 )
 
 type Deps struct {
-	AuthHandler  *auth.Handler
-	MediaHandler *media.Handler
-	JWTManager   *auth.JWTManager
-	RateLimiter  *middleware.RateLimiter
-	AuthLimiter  *middleware.RateLimiter
-	CORSOrigins  []string
-	IPAllowlist  []string
+	AuthHandler     *auth.Handler
+	MediaHandler    *media.Handler
+	JWTManager      *auth.JWTManager
+	RateLimiter     *middleware.RateLimiter
+	AuthLimiter     *middleware.RateLimiter
+	CORSOrigins     []string
+	IPAllowlist     []string
+	CertFingerprint string
 }
 
 func New(deps Deps) http.Handler {
 	mux := http.NewServeMux()
 
-	// Health (unauthenticated)
+	// Health & cert info (unauthenticated)
 	mux.HandleFunc("GET /api/v1/health", handleHealth)
+	mux.HandleFunc("GET /api/v1/cert/fingerprint", handleCertFingerprint(deps.CertFingerprint))
 
 	// Auth (unauthenticated)
 	mux.HandleFunc("POST /api/v1/auth/register", deps.AuthHandler.Register)
@@ -48,6 +50,8 @@ func New(deps Deps) http.Handler {
 	// Media mutations (authenticated, large body limit for upload)
 	mux.Handle("POST /api/v1/media/upload",
 		withBodyLimit(4<<30, applyAuth(deps.JWTManager, http.HandlerFunc(deps.MediaHandler.UploadMedia))))
+	mux.Handle("POST /api/v1/media/upload/batch",
+		withBodyLimit(4<<30, applyAuth(deps.JWTManager, http.HandlerFunc(deps.MediaHandler.BatchUploadMedia))))
 	mux.Handle("DELETE /api/v1/media/{id}",
 		applyAuth(deps.JWTManager, http.HandlerFunc(deps.MediaHandler.DeleteMedia)))
 	mux.Handle("PUT /api/v1/media/{id}",
@@ -85,4 +89,14 @@ func applyAdmin(jwtMgr *auth.JWTManager, h http.Handler) http.Handler {
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func handleCertFingerprint(fingerprint string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"algorithm":   "SHA-256",
+			"fingerprint": fingerprint,
+		})
+	}
 }

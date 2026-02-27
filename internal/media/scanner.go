@@ -34,6 +34,7 @@ func (s *Scanner) FullScan() {
 			continue
 		}
 
+		absDir, _ := filepath.Abs(dir)
 		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				slog.Debug("walk error", "path", path, "error", err)
@@ -41,8 +42,9 @@ func (s *Scanner) FullScan() {
 			}
 
 			if info.IsDir() {
-				// Skip hidden directories
-				if len(info.Name()) > 1 && info.Name()[0] == '.' {
+				// Skip hidden directories, but not the configured root directory itself
+				absPath, _ := filepath.Abs(path)
+				if absPath != absDir && len(info.Name()) > 1 && info.Name()[0] == '.' {
 					return filepath.SkipDir
 				}
 				return nil

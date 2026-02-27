@@ -113,6 +113,27 @@ func generateSelfSignedCert(certPath, keyPath string, hosts []string) error {
 	return nil
 }
 
+// CertFingerprint returns the SHA-256 fingerprint of the certificate at certPath
+// in colon-separated hex format (e.g., "AB:CD:EF:...").
+func CertFingerprint(certPath string) (string, error) {
+	data, err := os.ReadFile(certPath)
+	if err != nil {
+		return "", fmt.Errorf("reading certificate: %w", err)
+	}
+
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return "", fmt.Errorf("no PEM block found in %s", certPath)
+	}
+
+	fingerprint := sha256.Sum256(block.Bytes)
+	parts := make([]string, len(fingerprint))
+	for i, b := range fingerprint {
+		parts[i] = fmt.Sprintf("%02X", b)
+	}
+	return strings.Join(parts, ":"), nil
+}
+
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil

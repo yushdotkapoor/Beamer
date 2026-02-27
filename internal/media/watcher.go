@@ -57,6 +57,7 @@ func (w *Watcher) Stop() {
 }
 
 func (w *Watcher) addRecursive(root string) error {
+	absRoot, _ := filepath.Abs(root)
 	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
@@ -64,8 +65,9 @@ func (w *Watcher) addRecursive(root string) error {
 		if !info.IsDir() {
 			return nil
 		}
-		// Skip hidden directories
-		if len(info.Name()) > 1 && info.Name()[0] == '.' {
+		// Skip hidden directories, but not the configured root directory itself
+		absPath, _ := filepath.Abs(path)
+		if absPath != absRoot && len(info.Name()) > 1 && info.Name()[0] == '.' {
 			return filepath.SkipDir
 		}
 		return w.watcher.Add(path)

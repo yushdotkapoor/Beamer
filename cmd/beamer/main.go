@@ -83,6 +83,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	certFingerprint, err := beamertls.CertFingerprint(cfg.TLS.CertFile)
+	if err != nil {
+		slog.Error("failed to compute cert fingerprint", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("certificate fingerprint", "sha256", certFingerprint)
+
 	jwtMgr := auth.NewJWTManager(jwtSecret, cfg.Auth.AccessTokenTTL, cfg.Auth.RefreshTokenTTL)
 	authHandler := auth.NewHandler(db, jwtMgr, cfg.Auth)
 
@@ -103,16 +110,17 @@ func main() {
 
 	mediaStore := media.NewStore(db)
 	mediaScanner := media.NewScanner(mediaStore, allMediaDirs)
-	mediaHandler := media.NewHandler(mediaStore, mediaScanner, cfg.Media.UploadDirectory)
+	mediaHandler := media.NewHandler(mediaStore, mediaScanner, cfg.Media.UploadDirectory, cfg.Media.ThumbnailCache)
 
 	handler := router.New(router.Deps{
-		AuthHandler:  authHandler,
-		MediaHandler: mediaHandler,
-		JWTManager:   jwtMgr,
-		RateLimiter:  middleware.NewRateLimiter(cfg.Security.RateLimitRPS, cfg.Security.RateLimitBurst),
-		AuthLimiter:  middleware.NewRateLimiter(3, 5),
-		CORSOrigins:  cfg.Security.CORSOrigins,
-		IPAllowlist:  cfg.Security.IPAllowlist,
+		AuthHandler:     authHandler,
+		MediaHandler:    mediaHandler,
+		JWTManager:      jwtMgr,
+		RateLimiter:     middleware.NewRateLimiter(cfg.Security.RateLimitRPS, cfg.Security.RateLimitBurst),
+		AuthLimiter:     middleware.NewRateLimiter(3, 5),
+		CORSOrigins:     cfg.Security.CORSOrigins,
+		IPAllowlist:     cfg.Security.IPAllowlist,
+		CertFingerprint: certFingerprint,
 	})
 
 	srv := &http.Server{

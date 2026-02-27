@@ -5,22 +5,40 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-type Handler struct {
-	store     *Store
-	scanner   *Scanner
-	uploadDir string
+const maxUploadWorkers = 4
+
+type batchFileResult struct {
+	FileName string    `json:"file_name"`
+	Status   string    `json:"status"`
+	Error    *batchErr `json:"error,omitempty"`
+	Item     *MediaItem `json:"item,omitempty"`
 }
 
-func NewHandler(store *Store, scanner *Scanner, uploadDir string) *Handler {
-	return &Handler{store: store, scanner: scanner, uploadDir: uploadDir}
+type batchErr struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type Handler struct {
+	store         *Store
+	scanner       *Scanner
+	uploadDir     string
+	thumbnailDir  string
+}
+
+func NewHandler(store *Store, scanner *Scanner, uploadDir, thumbnailDir string) *Handler {
+	return &Handler{store: store, scanner: scanner, uploadDir: uploadDir, thumbnailDir: thumbnailDir}
 }
 
 func (h *Handler) ListMedia(w http.ResponseWriter, r *http.Request) {
@@ -108,27 +126,105 @@ func (h *Handler) ServeThumbnail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if item.MediaType != "photo" {
-		writeError(w, http.StatusNotFound, "NO_THUMBNAIL", "Thumbnails only available for photos")
-		return
+	switch item.MediaType {
+	case "photo":
+		h.servePhotoThumbnail(w, r, item)
+	case "video":
+		h.serveVideoThumbnail(w, r, item)
+	default:
+		writeError(w, http.StatusNotFound, "NO_THUMBNAIL", "Thumbnails not available for this media type")
 	}
+}
 
-	// Serve original photo as thumbnail (no resizing in Phase 3)
+func (h *Handler) servePhotoThumbnail(w http.ResponseWriter, r *http.Request, item *MediaItem) {
 	f, err := os.Open(item.FilePath)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "FILE_MISSING", "File no longer exists on disk")
 		return
 	}
 	defer f.Close()
-
 	stat, err := f.Stat()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "STAT_ERROR", "Failed to read file")
 		return
 	}
-
 	w.Header().Set("Content-Type", item.MimeType)
 	http.ServeContent(w, r, stat.Name(), stat.ModTime(), f)
+}
+
+func (h *Handler) serveVideoThumbnail(w http.ResponseWriter, r *http.Request, item *MediaItem) {
+	// Check for cached thumbnail
+	thumbPath := filepath.Join(h.thumbnailDir, fmt.Sprintf("%d.jpg", item.ID))
+
+	if f, err := os.Open(thumbPath); err == nil {
+		defer f.Close()
+		stat, err := f.Stat()
+		if err == nil {
+			w.Header().Set("Content-Type", "image/jpeg")
+			http.ServeContent(w, r, stat.Name(), stat.ModTime(), f)
+			return
+		}
+	}
+
+	// Generate thumbnail via ffmpeg
+	if err := h.generateVideoThumbnail(item.FilePath, thumbPath); err != nil {
+		slog.Error("failed to generate video thumbnail", "id", item.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "THUMBNAIL_ERROR", "Failed to generate thumbnail")
+		return
+	}
+
+	f, err := os.Open(thumbPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "THUMBNAIL_ERROR", "Failed to read generated thumbnail")
+		return
+	}
+	defer f.Close()
+
+	stat, err := f.Stat()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "STAT_ERROR", "Failed to read thumbnail")
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/jpeg")
+	http.ServeContent(w, r, stat.Name(), stat.ModTime(), f)
+}
+
+func (h *Handler) generateVideoThumbnail(videoPath, thumbPath string) error {
+	// Use ffmpeg to extract a frame at 50% of duration
+	// First get duration via ffprobe
+	probeCmd := exec.Command("/usr/local/bin/ffprobe",
+		"-v", "error",
+		"-show_entries", "format=duration",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		videoPath,
+	)
+	durationOut, err := probeCmd.Output()
+	if err != nil {
+		return fmt.Errorf("ffprobe failed: %w", err)
+	}
+
+	durationStr := strings.TrimSpace(string(durationOut))
+	duration, err := strconv.ParseFloat(durationStr, 64)
+	if err != nil {
+		duration = 1.0 // fallback: grab first frame
+	}
+
+	seekTo := fmt.Sprintf("%.2f", duration/2)
+
+	cmd := exec.Command("/usr/local/bin/ffmpeg",
+		"-ss", seekTo,
+		"-i", videoPath,
+		"-vframes", "1",
+		"-q:v", "3",
+		"-y",
+		thumbPath,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("ffmpeg failed: %w: %s", err, string(out))
+	}
+
+	return nil
 }
 
 func (h *Handler) BrowseDirectories(w http.ResponseWriter, r *http.Request) {
@@ -268,6 +364,127 @@ func (h *Handler) UploadMedia(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Handler) BatchUploadMedia(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, "PARSE_ERROR", "Failed to parse upload")
+		return
+	}
+
+	files := r.MultipartForm.File["files"]
+	if len(files) == 0 {
+		writeError(w, http.StatusUnprocessableEntity, "NO_FILES", "No files provided in 'files' field")
+		return
+	}
+
+	results := make([]batchFileResult, len(files))
+
+	sem := make(chan struct{}, maxUploadWorkers)
+	var wg sync.WaitGroup
+
+	for i, fh := range files {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(idx int, header *multipart.FileHeader) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			results[idx] = h.processOneUpload(header)
+		}(i, fh)
+	}
+
+	wg.Wait()
+
+	var succeeded, failed int
+	for _, res := range results {
+		if res.Status == "success" {
+			succeeded++
+		} else {
+			failed++
+		}
+	}
+
+	statusCode := http.StatusOK
+	if failed > 0 {
+		statusCode = 207
+	}
+
+	writeJSON(w, statusCode, map[string]interface{}{
+		"data": map[string]interface{}{
+			"results": results,
+			"summary": map[string]int{
+				"total":     len(files),
+				"succeeded": succeeded,
+				"failed":    failed,
+			},
+		},
+	})
+}
+
+func (h *Handler) processOneUpload(header *multipart.FileHeader) batchFileResult {
+	filename := header.Filename
+
+	if !IsMediaFile(filename) {
+		return batchFileResult{
+			FileName: filename,
+			Status:   "error",
+			Error:    &batchErr{Code: "UNSUPPORTED_TYPE", Message: "File type not supported"},
+		}
+	}
+
+	file, err := header.Open()
+	if err != nil {
+		return batchFileResult{
+			FileName: filename,
+			Status:   "error",
+			Error:    &batchErr{Code: "READ_ERROR", Message: "Failed to read uploaded file"},
+		}
+	}
+	defer file.Close()
+
+	destPath := filepath.Join(h.uploadDir, filename)
+	if _, err := os.Stat(destPath); err == nil {
+		ext := filepath.Ext(filename)
+		base := strings.TrimSuffix(filename, ext)
+		destPath = filepath.Join(h.uploadDir, fmt.Sprintf("%s_%d%s", base, time.Now().UnixNano(), ext))
+	}
+
+	dest, err := os.Create(destPath)
+	if err != nil {
+		slog.Error("batch upload: failed to create file", "path", destPath, "error", err)
+		return batchFileResult{
+			FileName: filename,
+			Status:   "error",
+			Error:    &batchErr{Code: "WRITE_ERROR", Message: "Failed to save file"},
+		}
+	}
+
+	if _, err := io.Copy(dest, file); err != nil {
+		dest.Close()
+		os.Remove(destPath)
+		return batchFileResult{
+			FileName: filename,
+			Status:   "error",
+			Error:    &batchErr{Code: "WRITE_ERROR", Message: "Failed to write file"},
+		}
+	}
+	dest.Close()
+
+	h.scanner.ScanFile(destPath)
+
+	item, err := h.store.GetByFilePath(destPath)
+	if err != nil {
+		return batchFileResult{
+			FileName: filepath.Base(destPath),
+			Status:   "success",
+		}
+	}
+
+	return batchFileResult{
+		FileName: filepath.Base(destPath),
+		Status:   "success",
+		Item:     item,
+	}
+}
+
 func (h *Handler) DeleteMedia(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -284,6 +501,10 @@ func (h *Handler) DeleteMedia(w http.ResponseWriter, r *http.Request) {
 	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
 		slog.Warn("failed to delete file from disk", "path", filePath, "error", err)
 	}
+
+	// Remove cached thumbnail if it exists
+	thumbPath := filepath.Join(h.thumbnailDir, fmt.Sprintf("%d.jpg", id))
+	os.Remove(thumbPath)
 
 	w.WriteHeader(http.StatusNoContent)
 }

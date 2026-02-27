@@ -108,8 +108,8 @@ func Default() *Config {
 			ThumbnailCache:  "./data/thumbnails",
 		},
 		Security: SecurityConfig{
-			RateLimitRPS:   10,
-			RateLimitBurst: 20,
+			RateLimitRPS:   100,
+			RateLimitBurst: 200,
 		},
 		Logging: LoggingConfig{
 			Level:  "info",

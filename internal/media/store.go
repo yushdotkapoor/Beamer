@@ -23,8 +23,9 @@ type MediaItem struct {
 	ParentDir   string   `json:"parent_dir"`
 	StreamURL   string   `json:"stream_url"`
 	ThumbnailURL string  `json:"thumbnail_url,omitempty"`
-	CreatedAt   string   `json:"created_at"`
-	UpdatedAt   string   `json:"updated_at"`
+	CreatedAt    string   `json:"created_at"`
+	UpdatedAt    string   `json:"updated_at"`
+	Checksum     string   `json:"checksum,omitempty"`
 }
 
 type ListParams struct {
@@ -152,12 +153,13 @@ func (s *Store) GetByID(id int64) (*MediaItem, error) {
 	var item MediaItem
 	var durSec sql.NullFloat64
 	var width, height sql.NullInt64
+	var checksum sql.NullString
 
 	err := s.db.QueryRow(
-		`SELECT id, file_path, file_name, media_type, mime_type, file_size, duration_sec, width, height, parent_dir, created_at, updated_at
+		`SELECT id, file_path, file_name, media_type, mime_type, file_size, duration_sec, width, height, parent_dir, created_at, updated_at, checksum
 		 FROM media WHERE id = ?`, id,
 	).Scan(&item.ID, &item.FilePath, &item.FileName, &item.MediaType, &item.MimeType,
-		&item.FileSize, &durSec, &width, &height, &item.ParentDir, &item.CreatedAt, &item.UpdatedAt)
+		&item.FileSize, &durSec, &width, &height, &item.ParentDir, &item.CreatedAt, &item.UpdatedAt, &checksum)
 	if err != nil {
 		return nil, err
 	}
@@ -173,11 +175,14 @@ func (s *Store) GetByID(id int64) (*MediaItem, error) {
 		h := int(height.Int64)
 		item.Height = &h
 	}
+	if checksum.Valid {
+		item.Checksum = checksum.String
+	}
 
 	item.FileSizeH = humanizeBytes(item.FileSize)
 	item.DurationH = humanizeDuration(item.DurationSec)
 	item.StreamURL = fmt.Sprintf("/api/v1/media/%d/stream", item.ID)
-	if item.MediaType == "photo" {
+	if item.MediaType == "photo" || item.MediaType == "video" {
 		item.ThumbnailURL = fmt.Sprintf("/api/v1/media/%d/thumbnail", item.ID)
 	}
 
@@ -215,7 +220,7 @@ func (s *Store) List(params ListParams) (*ListResult, error) {
 	}
 
 	offset := (params.Page - 1) * params.PerPage
-	query := "SELECT id, file_path, file_name, media_type, mime_type, file_size, duration_sec, width, height, parent_dir, created_at, updated_at FROM media" +
+	query := "SELECT id, file_path, file_name, media_type, mime_type, file_size, duration_sec, width, height, parent_dir, created_at, updated_at, checksum FROM media" +
 		where + orderBy + fmt.Sprintf(" LIMIT %d OFFSET %d", params.PerPage, offset)
 
 	rows, err := s.db.Query(query, args...)
@@ -276,7 +281,7 @@ func (s *Store) Search(params ListParams) (*ListResult, error) {
 	}
 
 	query := `SELECT m.id, m.file_path, m.file_name, m.media_type, m.mime_type, m.file_size,
-	          m.duration_sec, m.width, m.height, m.parent_dir, m.created_at, m.updated_at
+	          m.duration_sec, m.width, m.height, m.parent_dir, m.created_at, m.updated_at, m.checksum
 	          FROM media m JOIN media_fts f ON m.id = f.rowid
 	          WHERE media_fts MATCH ?` + queryWhere +
 		fmt.Sprintf(" ORDER BY rank LIMIT %d OFFSET %d", params.PerPage, offset)
@@ -348,12 +353,13 @@ func (s *Store) GetByFilePath(path string) (*MediaItem, error) {
 	var item MediaItem
 	var durSec sql.NullFloat64
 	var width, height sql.NullInt64
+	var checksum sql.NullString
 
 	err := s.db.QueryRow(
-		`SELECT id, file_path, file_name, media_type, mime_type, file_size, duration_sec, width, height, parent_dir, created_at, updated_at
+		`SELECT id, file_path, file_name, media_type, mime_type, file_size, duration_sec, width, height, parent_dir, created_at, updated_at, checksum
 		 FROM media WHERE file_path = ?`, path,
 	).Scan(&item.ID, &item.FilePath, &item.FileName, &item.MediaType, &item.MimeType,
-		&item.FileSize, &durSec, &width, &height, &item.ParentDir, &item.CreatedAt, &item.UpdatedAt)
+		&item.FileSize, &durSec, &width, &height, &item.ParentDir, &item.CreatedAt, &item.UpdatedAt, &checksum)
 	if err != nil {
 		return nil, err
 	}
@@ -369,11 +375,14 @@ func (s *Store) GetByFilePath(path string) (*MediaItem, error) {
 		h := int(height.Int64)
 		item.Height = &h
 	}
+	if checksum.Valid {
+		item.Checksum = checksum.String
+	}
 
 	item.FileSizeH = humanizeBytes(item.FileSize)
 	item.DurationH = humanizeDuration(item.DurationSec)
 	item.StreamURL = fmt.Sprintf("/api/v1/media/%d/stream", item.ID)
-	if item.MediaType == "photo" {
+	if item.MediaType == "photo" || item.MediaType == "video" {
 		item.ThumbnailURL = fmt.Sprintf("/api/v1/media/%d/thumbnail", item.ID)
 	}
 
@@ -398,9 +407,10 @@ func scanMediaRow(row scannable) (*MediaItem, error) {
 	var item MediaItem
 	var durSec sql.NullFloat64
 	var width, height sql.NullInt64
+	var checksum sql.NullString
 
 	err := row.Scan(&item.ID, &item.FilePath, &item.FileName, &item.MediaType, &item.MimeType,
-		&item.FileSize, &durSec, &width, &height, &item.ParentDir, &item.CreatedAt, &item.UpdatedAt)
+		&item.FileSize, &durSec, &width, &height, &item.ParentDir, &item.CreatedAt, &item.UpdatedAt, &checksum)
 	if err != nil {
 		return nil, err
 	}
@@ -416,11 +426,14 @@ func scanMediaRow(row scannable) (*MediaItem, error) {
 		h := int(height.Int64)
 		item.Height = &h
 	}
+	if checksum.Valid {
+		item.Checksum = checksum.String
+	}
 
 	item.FileSizeH = humanizeBytes(item.FileSize)
 	item.DurationH = humanizeDuration(item.DurationSec)
 	item.StreamURL = fmt.Sprintf("/api/v1/media/%d/stream", item.ID)
-	if item.MediaType == "photo" {
+	if item.MediaType == "photo" || item.MediaType == "video" {
 		item.ThumbnailURL = fmt.Sprintf("/api/v1/media/%d/thumbnail", item.ID)
 	}
 

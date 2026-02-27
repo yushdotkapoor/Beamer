@@ -16,7 +16,6 @@ type Config struct {
 	Server   ServerConfig   `yaml:"server"`
 	TLS      TLSConfig      `yaml:"tls"`
 	Database DatabaseConfig `yaml:"database"`
-	Auth     AuthConfig     `yaml:"auth"`
 	Media    MediaConfig    `yaml:"media"`
 	Security SecurityConfig `yaml:"security"`
 	Logging  LoggingConfig  `yaml:"logging"`
@@ -31,9 +30,14 @@ type ServerConfig struct {
 }
 
 type TLSConfig struct {
-	CertFile string   `yaml:"cert_file"`
-	KeyFile  string   `yaml:"key_file"`
-	Hosts    []string `yaml:"hosts"`
+	CACertFile string   `yaml:"ca_cert_file"`
+	CAKeyFile  string   `yaml:"ca_key_file"`
+	CertFile   string   `yaml:"cert_file"`
+	KeyFile    string   `yaml:"key_file"`
+	ClientCert string   `yaml:"client_cert_file"`
+	ClientKey  string   `yaml:"client_key_file"`
+	ClientP12  string   `yaml:"client_p12_file"`
+	Hosts      []string `yaml:"hosts"`
 }
 
 type DatabaseConfig struct {
@@ -44,14 +48,6 @@ type DatabaseConfig struct {
 	Synchronous string `yaml:"synchronous"`
 }
 
-type AuthConfig struct {
-	JWTSecret        string        `yaml:"jwt_secret"`
-	AccessTokenTTL   time.Duration `yaml:"access_token_ttl"`
-	RefreshTokenTTL  time.Duration `yaml:"refresh_token_ttl"`
-	BcryptCost       int           `yaml:"bcrypt_cost"`
-	MaxLoginAttempts int           `yaml:"max_login_attempts"`
-	LockoutDuration  time.Duration `yaml:"lockout_duration"`
-}
 
 type MediaConfig struct {
 	Directories     []string `yaml:"directories"`
@@ -83,9 +79,14 @@ func Default() *Config {
 			IdleTimeout:  120 * time.Second,
 		},
 		TLS: TLSConfig{
-			CertFile: "./data/cert.pem",
-			KeyFile:  "./data/key.pem",
-			Hosts:    []string{"localhost"},
+			CACertFile: "./data/ca_cert.pem",
+			CAKeyFile:  "./data/ca_key.pem",
+			CertFile:   "./data/cert.pem",
+			KeyFile:    "./data/key.pem",
+			ClientCert: "./data/client_cert.pem",
+			ClientKey:  "./data/client_key.pem",
+			ClientP12:  "./data/client.p12",
+			Hosts:      []string{"localhost"},
 		},
 		Database: DatabaseConfig{
 			Path:        "./data/beamer.db",
@@ -93,13 +94,6 @@ func Default() *Config {
 			BusyTimeout: 5000,
 			CacheSize:   -2000,
 			Synchronous: "NORMAL",
-		},
-		Auth: AuthConfig{
-			AccessTokenTTL:   15 * time.Minute,
-			RefreshTokenTTL:  7 * 24 * time.Hour,
-			BcryptCost:       12,
-			MaxLoginAttempts: 5,
-			LockoutDuration:  15 * time.Minute,
 		},
 		Media: MediaConfig{
 			UploadDirectory: "./data/uploads",

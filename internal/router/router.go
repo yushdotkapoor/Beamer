@@ -4,17 +4,13 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/yushrajkapoor/beamer/internal/auth"
 	"github.com/yushrajkapoor/beamer/internal/media"
 	"github.com/yushrajkapoor/beamer/internal/middleware"
 )
 
 type Deps struct {
-	AuthHandler     *auth.Handler
 	MediaHandler    *media.Handler
-	JWTManager      *auth.JWTManager
 	RateLimiter     *middleware.RateLimiter
-	AuthLimiter     *middleware.RateLimiter
 	CORSOrigins     []string
 	IPAllowlist     []string
 	CertFingerprint string
@@ -23,52 +19,36 @@ type Deps struct {
 func New(deps Deps) http.Handler {
 	mux := http.NewServeMux()
 
-	// Health & cert info (unauthenticated)
+	// Health & cert info
 	mux.HandleFunc("GET /api/v1/health", handleHealth)
 	mux.HandleFunc("GET /api/v1/cert/fingerprint", handleCertFingerprint(deps.CertFingerprint))
 
-	// Auth (unauthenticated)
-	mux.HandleFunc("POST /api/v1/auth/register", deps.AuthHandler.Register)
-	mux.HandleFunc("POST /api/v1/auth/login", deps.AuthHandler.Login)
-	mux.HandleFunc("POST /api/v1/auth/totp/validate", deps.AuthHandler.TOTPValidate)
-	mux.HandleFunc("POST /api/v1/auth/refresh", deps.AuthHandler.Refresh)
+	// Media (mTLS-protected at TLS layer)
+	mux.HandleFunc("GET /api/v1/media", deps.MediaHandler.ListMedia)
+	mux.HandleFunc("GET /api/v1/media/browse", deps.MediaHandler.BrowseDirectories)
+	mux.HandleFunc("GET /api/v1/media/search", deps.MediaHandler.SearchMedia)
+	mux.HandleFunc("GET /api/v1/media/{id}", deps.MediaHandler.GetMedia)
+	mux.HandleFunc("GET /api/v1/media/{id}/stream", deps.MediaHandler.StreamMedia)
+	mux.HandleFunc("GET /api/v1/media/{id}/thumbnail", deps.MediaHandler.ServeThumbnail)
 
-	// Auth (authenticated)
-	mux.Handle("POST /api/v1/auth/logout", applyAuth(deps.JWTManager, http.HandlerFunc(deps.AuthHandler.Logout)))
-	mux.Handle("POST /api/v1/auth/totp/setup", applyAuth(deps.JWTManager, http.HandlerFunc(deps.AuthHandler.TOTPSetup)))
-	mux.Handle("POST /api/v1/auth/totp/verify", applyAuth(deps.JWTManager, http.HandlerFunc(deps.AuthHandler.TOTPVerify)))
-	mux.Handle("DELETE /api/v1/auth/totp", applyAuth(deps.JWTManager, http.HandlerFunc(deps.AuthHandler.TOTPDisable)))
-
-	// Media (authenticated)
-	mux.Handle("GET /api/v1/media", applyAuth(deps.JWTManager, http.HandlerFunc(deps.MediaHandler.ListMedia)))
-	mux.Handle("GET /api/v1/media/browse", applyAuth(deps.JWTManager, http.HandlerFunc(deps.MediaHandler.BrowseDirectories)))
-	mux.Handle("GET /api/v1/media/search", applyAuth(deps.JWTManager, http.HandlerFunc(deps.MediaHandler.SearchMedia)))
-	mux.Handle("GET /api/v1/media/{id}", applyAuth(deps.JWTManager, http.HandlerFunc(deps.MediaHandler.GetMedia)))
-	mux.Handle("GET /api/v1/media/{id}/stream", applyAuth(deps.JWTManager, http.HandlerFunc(deps.MediaHandler.StreamMedia)))
-	mux.Handle("GET /api/v1/media/{id}/thumbnail", applyAuth(deps.JWTManager, http.HandlerFunc(deps.MediaHandler.ServeThumbnail)))
-
-	// Media mutations (authenticated, large body limit for upload)
+	// Media mutations
 	mux.Handle("POST /api/v1/media/upload",
-		withBodyLimit(4<<30, applyAuth(deps.JWTManager, http.HandlerFunc(deps.MediaHandler.UploadMedia))))
+		withBodyLimit(4<<30, http.HandlerFunc(deps.MediaHandler.UploadMedia)))
 	mux.Handle("POST /api/v1/media/upload/batch",
-		withBodyLimit(4<<30, applyAuth(deps.JWTManager, http.HandlerFunc(deps.MediaHandler.BatchUploadMedia))))
-	mux.Handle("DELETE /api/v1/media/{id}",
-		applyAuth(deps.JWTManager, http.HandlerFunc(deps.MediaHandler.DeleteMedia)))
-	mux.Handle("PUT /api/v1/media/{id}",
-		applyAuth(deps.JWTManager, http.HandlerFunc(deps.MediaHandler.RenameMedia)))
+		withBodyLimit(4<<30, http.HandlerFunc(deps.MediaHandler.BatchUploadMedia)))
+	mux.HandleFunc("DELETE /api/v1/media/{id}", deps.MediaHandler.DeleteMedia)
+	mux.HandleFunc("PUT /api/v1/media/{id}", deps.MediaHandler.RenameMedia)
 
 	// Admin
-	mux.Handle("POST /api/v1/admin/users", applyAdmin(deps.JWTManager, http.HandlerFunc(deps.AuthHandler.CreateUser)))
-	mux.Handle("GET /api/v1/admin/users", applyAdmin(deps.JWTManager, http.HandlerFunc(deps.AuthHandler.ListUsers)))
-	mux.Handle("DELETE /api/v1/admin/users/{id}", applyAdmin(deps.JWTManager, http.HandlerFunc(deps.AuthHandler.DeleteUser)))
-	mux.Handle("POST /api/v1/admin/scan", applyAdmin(deps.JWTManager, http.HandlerFunc(deps.MediaHandler.TriggerRescan)))
+	mux.HandleFunc("POST /api/v1/admin/scan", deps.MediaHandler.TriggerRescan)
 
-	// Build middleware chain (outermost first)
+	// Middleware chain (outermost first)
 	var handler http.Handler = mux
 	handler = middleware.SecurityHeaders(handler)
 	handler = middleware.CORS(deps.CORSOrigins)(handler)
 	handler = middleware.IPAllowlist(deps.IPAllowlist)(handler)
 	handler = deps.RateLimiter.Middleware(handler)
+	handler = requireClientCert(handler)
 	handler = middleware.Logging(handler)
 
 	return handler
@@ -78,12 +58,24 @@ func withBodyLimit(limit int64, h http.Handler) http.Handler {
 	return middleware.MaxBodySize(limit)(h)
 }
 
-func applyAuth(jwtMgr *auth.JWTManager, h http.Handler) http.Handler {
-	return auth.RequireAuth(jwtMgr)(h)
-}
-
-func applyAdmin(jwtMgr *auth.JWTManager, h http.Handler) http.Handler {
-	return auth.RequireAdmin(jwtMgr)(h)
+// requireClientCert is a belt-and-suspenders check: the TLS layer already
+// enforces RequireAndVerifyClientCert, but this rejects any request that
+// somehow arrives without a verified peer certificate.
+func requireClientCert(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]string{
+					"code":    "CERT_REQUIRED",
+					"message": "Client certificate required",
+				},
+			})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {

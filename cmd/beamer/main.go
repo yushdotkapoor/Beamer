@@ -11,7 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/yushrajkapoor/beamer/internal/auth"
 	"github.com/yushrajkapoor/beamer/internal/config"
 	"github.com/yushrajkapoor/beamer/internal/database"
 	"github.com/yushrajkapoor/beamer/internal/media"
@@ -53,33 +52,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Ensure JWT secret exists
-	jwtSecret := cfg.Auth.JWTSecret
-	if jwtSecret == "" {
-		// Check if stored in DB
-		var stored string
-		err := db.QueryRow("SELECT value FROM server_meta WHERE key = 'jwt_secret'").Scan(&stored)
-		if err == nil && stored != "" {
-			jwtSecret = stored
-		} else {
-			jwtSecret, err = auth.GenerateJWTSecret()
-			if err != nil {
-				slog.Error("failed to generate JWT secret", "error", err)
-				os.Exit(1)
-			}
-			db.Exec("INSERT OR REPLACE INTO server_meta (key, value) VALUES ('jwt_secret', ?)", jwtSecret)
-			slog.Info("generated new JWT signing secret")
-		}
+	// Generate CA, server cert, and client cert for mTLS
+	certPaths := beamertls.CertPaths{
+		CACert:     cfg.TLS.CACertFile,
+		CAKey:      cfg.TLS.CAKeyFile,
+		ServerCert: cfg.TLS.CertFile,
+		ServerKey:  cfg.TLS.KeyFile,
+		ClientCert: cfg.TLS.ClientCert,
+		ClientKey:  cfg.TLS.ClientKey,
+		ClientP12:  cfg.TLS.ClientP12,
+		Hosts:      cfg.TLS.Hosts,
 	}
-
-	if err := beamertls.EnsureCert(cfg.TLS.CertFile, cfg.TLS.KeyFile, cfg.TLS.Hosts); err != nil {
-		slog.Error("failed to ensure TLS certificate", "error", err)
+	if err := beamertls.EnsureMTLSCerts(certPaths); err != nil {
+		slog.Error("failed to ensure mTLS certificates", "error", err)
 		os.Exit(1)
 	}
 
-	tlsConfig, err := beamertls.LoadTLSConfig(cfg.TLS.CertFile, cfg.TLS.KeyFile)
+	tlsConfig, err := beamertls.LoadMTLSConfig(cfg.TLS.CertFile, cfg.TLS.KeyFile, cfg.TLS.CACertFile)
 	if err != nil {
-		slog.Error("failed to load TLS config", "error", err)
+		slog.Error("failed to load mTLS config", "error", err)
 		os.Exit(1)
 	}
 
@@ -89,9 +80,6 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("certificate fingerprint", "sha256", certFingerprint)
-
-	jwtMgr := auth.NewJWTManager(jwtSecret, cfg.Auth.AccessTokenTTL, cfg.Auth.RefreshTokenTTL)
-	authHandler := auth.NewHandler(db, jwtMgr, cfg.Auth)
 
 	// Merge upload directory into scanned directories
 	allMediaDirs := cfg.Media.Directories
@@ -113,11 +101,8 @@ func main() {
 	mediaHandler := media.NewHandler(mediaStore, mediaScanner, cfg.Media.UploadDirectory, cfg.Media.ThumbnailCache)
 
 	handler := router.New(router.Deps{
-		AuthHandler:     authHandler,
 		MediaHandler:    mediaHandler,
-		JWTManager:      jwtMgr,
 		RateLimiter:     middleware.NewRateLimiter(cfg.Security.RateLimitRPS, cfg.Security.RateLimitBurst),
-		AuthLimiter:     middleware.NewRateLimiter(3, 5),
 		CORSOrigins:     cfg.Security.CORSOrigins,
 		IPAllowlist:     cfg.Security.IPAllowlist,
 		CertFingerprint: certFingerprint,
@@ -148,13 +133,6 @@ func main() {
 				slog.Error("failed to start file watcher", "error", err)
 			}
 		}
-	}
-
-	// Check if admin exists
-	var adminCount int
-	db.QueryRow("SELECT COUNT(*) FROM users WHERE role = 'admin'").Scan(&adminCount)
-	if adminCount == 0 {
-		slog.Info("no admin user found — register at POST /api/v1/auth/register")
 	}
 
 	quit := make(chan os.Signal, 1)

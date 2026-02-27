@@ -1,4 +1,5 @@
 bin/
+beamer
 data/
 *.db
 coverage.out
